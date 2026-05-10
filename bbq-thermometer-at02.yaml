@@ -17,7 +17,7 @@
 #    Source thread:
 #      https://community.home-assistant.io/t/bbq-grill-thermometer-at-02/584078
 #
-#  Modified by wpbezemer (with help from Claude / Anthropic):
+#  Modified by wpbezemer:
 #    - Added binary_sensor for overall BLE connection state
 #    - Added text_sensor per probe showing "Disconnected" when
 #      probe is unplugged (0x7FFF in packet) or BLE disconnected
