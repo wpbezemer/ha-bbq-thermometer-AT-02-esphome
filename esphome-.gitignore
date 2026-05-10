@@ -1,0 +1,17 @@
+# Never commit secrets!
+secrets.yaml
+.secrets.yaml
+
+# ESPHome build artifacts
+.esphome/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo

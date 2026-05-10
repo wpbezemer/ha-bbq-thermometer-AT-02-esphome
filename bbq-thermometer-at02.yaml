@@ -1,0 +1,251 @@
+###############################################################
+#  ESPHome — AT-02 BBQ Thermometer
+#
+#  Credits:
+#    Protocol research & decoding:
+#      - syepes (Sebastian YEPES)  — initial reverse engineering
+#        https://community.home-assistant.io/u/syepes
+#      - DigiH                     — temperature decoding algorithm
+#        https://community.home-assistant.io/u/DigiH
+#      - LangeJan (Jan)            — packet structure & checksum analysis
+#        https://community.home-assistant.io/u/LangeJan
+#      - yurassic                  — BLE authentication sequence
+#        https://community.home-assistant.io/u/yurassic
+#      - Adma2761                  — first working ESPHome YAML
+#        https://community.home-assistant.io/u/Adma2761
+#
+#    Source thread:
+#      https://community.home-assistant.io/t/bbq-grill-thermometer-at-02/584078
+#
+#  Modified by wpbezemer (with help from Claude / Anthropic):
+#    - Added binary_sensor for overall BLE connection state
+#    - Added text_sensor per probe showing "Disconnected" when
+#      probe is unplugged (0x7FFF in packet) or BLE disconnected
+#    - On BLE disconnect all sensors publish NAN + "Disconnected"
+#    - Designed to work with ha-bbq-card (github.com/wpbezemer/ha-bbq-card)
+###############################################################
+
+esphome:
+  name: bbq-termometer-at02
+  friendly_name: bbq-termometer-at02
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+api:
+  encryption:
+    key: !secret encryption
+
+ota:
+  - platform: esphome
+    password: !secret ota_bbq_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Bbq-Termometer-At02"
+    password: !secret ap_password
+
+captive_portal:
+
+logger:
+  level: DEBUG
+
+# ── BLE tracker ───────────────────────────────────────────────
+
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+
+# ── BLE client ────────────────────────────────────────────────
+# Replace ble_bbq_mac in secrets.yaml with your AT-02 MAC address.
+# Find it with a BLE Scanner app on your phone (look for "AT-02")
+# or on Linux: sudo hcitool lescan
+
+ble_client:
+  - mac_address: !secret ble_bbq_mac
+    id: at02
+    on_connect:
+      then:
+        - lambda: |-
+            ESP_LOGD("ble_client_lambda", "Connected to Barbeque Sensor");
+        - binary_sensor.template.publish:
+            id: bbq_connected
+            state: true
+        - delay: 3s
+        # Auth sequence discovered by yurassic
+        - ble_client.ble_write:
+            id: at02
+            service_uuid: CEE0
+            characteristic_uuid: CEE1
+            value: [0x55, 0xAA, 0x00, 0x03, 0xA0, 0x00, 0x00, 0x5C]
+        - delay: 2s
+        - ble_client.ble_write:
+            id: at02
+            service_uuid: CEE0
+            characteristic_uuid: CEE1
+            value: [0x55, 0xAA, 0x00, 0x02, 0xA1, 0x00, 0x5C]
+    on_disconnect:
+      then:
+        - lambda: |-
+            ESP_LOGD("ble_client_lambda", "Disconnected from Barbeque Sensor");
+            id(probe1).publish_state(NAN);
+            id(probe2).publish_state(NAN);
+            id(probe3).publish_state(NAN);
+            id(probe4).publish_state(NAN);
+            id(ambient).publish_state(NAN);
+            id(probe1_text).publish_state("Disconnected");
+            id(probe2_text).publish_state("Disconnected");
+            id(probe3_text).publish_state("Disconnected");
+            id(probe4_text).publish_state("Disconnected");
+            id(ambient_text).publish_state("Disconnected");
+        - binary_sensor.template.publish:
+            id: bbq_connected
+            state: false
+
+# ── Connection state ──────────────────────────────────────────
+
+binary_sensor:
+  - platform: template
+    name: "BBQ Thermometer Connected"
+    id: bbq_connected
+    device_class: connectivity
+
+# ── Temperature sensors ───────────────────────────────────────
+# Packet structure (decoded by LangeJan & DigiH):
+#   [0-1]   = 0x55 0xAA  (header)
+#   [4]     = 0xA1       (temperature message type)
+#   [5-6]   = probe 1 temperature  (big-endian int16, /10 = °C)
+#   [7-8]   = probe 2 temperature
+#   [9-10]  = probe 3 temperature
+#   [11-12] = probe 4 temperature
+#   [17-18] = ambient temperature
+#   0x7FFF  = probe not connected
+
+sensor:
+  - platform: ble_client
+    ble_client_id: at02
+    id: bbq_data
+    type: characteristic
+    service_uuid: 'CEE0'
+    characteristic_uuid: 'CEE2'
+    notify: true
+    lambda: |-
+      if (x.size() >= 19 && x[0] == 0x55 && x[1] == 0xAA && x[4] == 0xA1) {
+
+        int16_t raw1 = (x[5] << 8) | x[6];
+        if (raw1 == 0x7FFF || (raw1 / 10.0f) <= 0) { id(probe1_text).publish_state("Disconnected"); id(probe1).publish_state(NAN); }
+        else { id(probe1).publish_state(raw1 / 10.0f); id(probe1_text).publish_state(to_string(raw1 / 10.0f)); }
+
+        int16_t raw2 = (x[7] << 8) | x[8];
+        if (raw2 == 0x7FFF || (raw2 / 10.0f) <= 0) { id(probe2_text).publish_state("Disconnected"); id(probe2).publish_state(NAN); }
+        else { id(probe2).publish_state(raw2 / 10.0f); id(probe2_text).publish_state(to_string(raw2 / 10.0f)); }
+
+        int16_t raw3 = (x[9] << 8) | x[10];
+        if (raw3 == 0x7FFF || (raw3 / 10.0f) <= 0) { id(probe3_text).publish_state("Disconnected"); id(probe3).publish_state(NAN); }
+        else { id(probe3).publish_state(raw3 / 10.0f); id(probe3_text).publish_state(to_string(raw3 / 10.0f)); }
+
+        int16_t raw4 = (x[11] << 8) | x[12];
+        if (raw4 == 0x7FFF || (raw4 / 10.0f) <= 0) { id(probe4_text).publish_state("Disconnected"); id(probe4).publish_state(NAN); }
+        else { id(probe4).publish_state(raw4 / 10.0f); id(probe4_text).publish_state(to_string(raw4 / 10.0f)); }
+
+        int16_t raw_amb = (x[17] << 8) | x[18];
+        if (raw_amb == 0x7FFF) { id(ambient_text).publish_state("Disconnected"); id(ambient).publish_state(NAN); }
+        else { id(ambient).publish_state(raw_amb / 10.0f); id(ambient_text).publish_state(to_string(raw_amb / 10.0f)); }
+      }
+      return NAN;
+
+  - platform: template
+    name: "Probe 1 Temperature"
+    id: probe1
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: template
+    name: "Probe 2 Temperature"
+    id: probe2
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: template
+    name: "Probe 3 Temperature"
+    id: probe3
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: template
+    name: "Probe 4 Temperature"
+    id: probe4
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: template
+    name: "Ambient Temperature"
+    id: ambient
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: never
+
+# ── Status text sensors ───────────────────────────────────────
+# Used by ha-bbq-card as temp_entity — shows "Disconnected" when
+# the probe is unplugged or the thermometer is out of range.
+
+text_sensor:
+  - platform: template
+    name: "Probe 1 Status"
+    id: probe1_text
+    update_interval: 60s
+    lambda: |-
+      if (id(bbq_connected).state) {
+        return {};
+      }
+      return {"Disconnected"};
+
+  - platform: template
+    name: "Probe 2 Status"
+    id: probe2_text
+    update_interval: 60s
+    lambda: |-
+      if (id(bbq_connected).state) {
+        return {};
+      }
+      return {"Disconnected"};
+
+  - platform: template
+    name: "Probe 3 Status"
+    id: probe3_text
+    update_interval: 60s
+    lambda: |-
+      if (id(bbq_connected).state) {
+        return {};
+      }
+      return {"Disconnected"};
+
+  - platform: template
+    name: "Probe 4 Status"
+    id: probe4_text
+    update_interval: 60s
+    lambda: |-
+      if (id(bbq_connected).state) {
+        return {};
+      }
+      return {"Disconnected"};
+
+  - platform: template
+    name: "Ambient Status"
+    id: ambient_text
+    update_interval: 60s
+    lambda: |-
+      if (id(bbq_connected).state) {
+        return {};
+      }
+      return {"Disconnected"};
